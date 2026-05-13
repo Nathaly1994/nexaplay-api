@@ -4,117 +4,91 @@ from typing import Literal
 import pickle
 import numpy as np
 
-# ── Cargar modelo y encoders ──────────────────────────────────────────────────
+# ── Cargar modelos ────────────────────────────────────────────────────────────
 with open("modelo.pkl", "rb") as f:
-    model = pickle.load(f)
-
+    model_valor = pickle.load(f)
 with open("encoders.pkl", "rb") as f:
-    enc = pickle.load(f)
+    enc_valor = pickle.load(f)
 
-le_foot = enc["le_foot"]
-le_work = enc["le_work"]
-le_pos  = enc["le_pos"]
+with open("modelo_potencial.pkl", "rb") as f:
+    model_potencial = pickle.load(f)
+with open("encoders_potencial.pkl", "rb") as f:
+    enc_potencial = pickle.load(f)
 
-# ── App FastAPI ───────────────────────────────────────────────────────────────
+# ── App ───────────────────────────────────────────────────────────────────────
 app = FastAPI(
     title="NexaPlay Predictor API",
-    description="Predice el **valor de mercado** de un jugador de FIFA 21 en euros, "
-                "basado en sus atributos físicos, técnicos y contractuales.",
-    version="0.1.0",
+    description="Predice el valor de mercado y el potencial de jugadores FIFA 21 usando Machine Learning.",
+    version="0.2.0",
 )
 
-# ── Esquema de entrada ────────────────────────────────────────────────────────
+# ── Esquema ───────────────────────────────────────────────────────────────────
 class PlayerInput(BaseModel):
-    age: int = Field(..., ge=15, le=45, example=24, description="Edad del jugador")
-    overall: int = Field(..., ge=40, le=99, example=85, description="Overall rating (40-99)")
-    potential: int = Field(..., ge=40, le=99, example=90, description="Potencial máximo (40-99)")
-    wage_eur: float = Field(..., ge=0, example=50000, description="Salario semanal en euros")
-    international_reputation: int = Field(..., ge=1, le=5, example=3, description="Reputación internacional (1-5)")
-    weak_foot: int = Field(..., ge=1, le=5, example=3, description="Pierna débil (1-5)")
-    skill_moves: int = Field(..., ge=1, le=5, example=4, description="Habilidades (1-5)")
-    pace: float = Field(0, ge=0, le=99, example=80, description="Velocidad (0 para porteros)")
-    shooting: float = Field(0, ge=0, le=99, example=82, description="Disparo (0 para porteros)")
-    passing: float = Field(0, ge=0, le=99, example=75, description="Pase (0 para porteros)")
-    dribbling: float = Field(0, ge=0, le=99, example=86, description="Regate (0 para porteros)")
-    defending: float = Field(0, ge=0, le=99, example=40, description="Defensa (0 para porteros)")
-    physic: float = Field(0, ge=0, le=99, example=74, description="Físico (0 para porteros)")
-    preferred_foot: Literal["Left", "Right"] = Field("Right", example="Right", description="Pie dominante")
-    work_rate: str = Field("Medium/ Medium", example="High/ Medium",
-                           description="Ritmo de trabajo (ej: High/ Medium, Low/ High)")
-    main_position: str = Field(..., example="ST",
-                               description="Posición principal (ej: ST, CB, GK, CAM, LW...)")
+    age: int = Field(..., ge=15, le=45, example=22)
+    overall: int = Field(..., ge=40, le=99, example=85)
+    potential: int = Field(0, ge=0, le=99, example=90, description="Solo para /predict/valor")
+    wage_eur: float = Field(..., ge=0, example=80000)
+    value_eur: float = Field(0, ge=0, example=50000000, description="Solo para /predict/potencial")
+    international_reputation: int = Field(..., ge=1, le=5, example=3)
+    weak_foot: int = Field(..., ge=1, le=5, example=4)
+    skill_moves: int = Field(..., ge=1, le=5, example=4)
+    pace: float = Field(0, ge=0, le=99, example=90)
+    shooting: float = Field(0, ge=0, le=99, example=82)
+    passing: float = Field(0, ge=0, le=99, example=78)
+    dribbling: float = Field(0, ge=0, le=99, example=88)
+    defending: float = Field(0, ge=0, le=99, example=35)
+    physic: float = Field(0, ge=0, le=99, example=72)
+    preferred_foot: Literal["Left", "Right"] = Field("Right", example="Right")
+    work_rate: str = Field("Medium/Medium", example="High/Medium")
+    main_position: str = Field(..., example="ST")
 
-class PredictionOutput(BaseModel):
-    predicted_value_eur: float
-    predicted_value_formatted: str
-    input_summary: dict
+# ── Helper ────────────────────────────────────────────────────────────────────
+def encode(data: PlayerInput, enc: dict):
+    try:
+        foot = enc['le_foot'].transform([data.preferred_foot])[0]
+    except:
+        raise HTTPException(400, "preferred_foot invalido. Usa: Left o Right")
+    try:
+        work = enc['le_work'].transform([data.work_rate])[0]
+    except:
+        raise HTTPException(400, "work_rate invalido. Ej: High/Medium, Medium/Medium")
+    try:
+        pos = enc['le_pos'].transform([data.main_position])[0]
+    except:
+        raise HTTPException(400, "Posicion invalida. Ej: ST, CB, GK, CAM, LW")
+    return foot, work, pos
 
 # ── Endpoints ─────────────────────────────────────────────────────────────────
 @app.get("/health", tags=["Status"])
 def health():
-    """Verifica que la API esté activa."""
-    return {"status": "ok", "model": "Random Forest FIFA 21", "version": "0.1.0"}
+    return {"status": "ok", "version": "0.2.0", "modelos": ["valor", "potencial"]}
 
-
-@app.post("/predict", response_model=PredictionOutput, tags=["Predicción"])
-def predict(player: PlayerInput):
-    """
-    Predice el **valor de mercado en euros** de un jugador FIFA 21.
-
-    - Envía los atributos del jugador en el body.
-    - Recibe el valor estimado en euros.
-    """
-    # Encodear categóricas
-    try:
-        foot_enc = le_foot.transform([player.preferred_foot])[0]
-    except ValueError:
-        raise HTTPException(400, f"preferred_foot inválido. Usa: {list(le_foot.classes_)}")
-
-    try:
-        work_enc = le_work.transform([player.work_rate])[0]
-    except ValueError:
-        raise HTTPException(400, f"work_rate inválido. Ejemplos: High/ Medium, Medium/ Medium, Low/ High")
-
-    try:
-        pos_enc = le_pos.transform([player.main_position])[0]
-    except ValueError:
-        raise HTTPException(400, f"Posición inválida. Usa: {list(le_pos.classes_)}")
-
-    # Construir vector de features en el mismo orden del entrenamiento
+@app.post("/predict/valor", tags=["Predicciones"])
+def predict_valor(data: PlayerInput):
+    """Predice el valor de mercado en euros del jugador."""
+    foot, work, pos = encode(data, enc_valor)
     X = np.array([[
-        player.age,
-        player.overall,
-        player.potential,
-        player.wage_eur,
-        player.international_reputation,
-        player.weak_foot,
-        player.skill_moves,
-        player.pace,
-        player.shooting,
-        player.passing,
-        player.dribbling,
-        player.defending,
-        player.physic,
-        foot_enc,
-        work_enc,
-        pos_enc,
+        data.age, data.overall, data.potential, data.wage_eur,
+        data.international_reputation, data.weak_foot, data.skill_moves,
+        data.pace, data.shooting, data.passing, data.dribbling,
+        data.defending, data.physic, foot, work, pos
     ]])
+    valor = float(model_valor.predict(X)[0])
+    fmt = f"EUR{valor/1_000_000:.2f}M" if valor >= 1_000_000 else f"EUR{valor/1_000:.0f}K"
+    return {"predicted_value_eur": round(valor, 2), "predicted_value_formatted": fmt}
 
-    valor = float(model.predict(X)[0])
-
-    # Formateo legible
-    if valor >= 1_000_000:
-        fmt = f"€{valor/1_000_000:.2f}M"
-    else:
-        fmt = f"€{valor/1_000:.0f}K"
-
-    return PredictionOutput(
-        predicted_value_eur=round(valor, 2),
-        predicted_value_formatted=fmt,
-        input_summary={
-            "name_placeholder": f"Jugador ({player.main_position})",
-            "overall": player.overall,
-            "potential": player.potential,
-            "age": player.age,
-        }
-    )
+@app.post("/predict/potencial", tags=["Predicciones"])
+def predict_potencial(data: PlayerInput):
+    """Predice el potencial maximo del jugador (escala 1-99)."""
+    foot, work, pos = encode(data, enc_potencial)
+    X = np.array([[
+        data.age, data.overall, data.value_eur, data.wage_eur,
+        data.international_reputation, data.weak_foot, data.skill_moves,
+        data.pace, data.shooting, data.passing, data.dribbling,
+        data.defending, data.physic, foot, work, pos
+    ]])
+    potencial = float(model_potencial.predict(X)[0])
+    return {
+        "predicted_potential": round(potencial, 1),
+        "predicted_potential_formatted": f"{potencial:.1f}/99"
+    }
